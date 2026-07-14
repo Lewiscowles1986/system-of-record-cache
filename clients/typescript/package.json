@@ -1,0 +1,20 @@
+{
+  "name": "shared-store-client",
+  "version": "0.1.0",
+  "description": "Shared key-value store client for Redis",
+  "main": "dist/store_client.js",
+  "types": "dist/store_client.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test store_client.test.ts"
+  },
+  "dependencies": {
+    "ioredis": "^5.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/node": "^20.0.0",
+    "testcontainers": "^10.0.0",
+    "tsx": "^4.7.0"
+  }
+}

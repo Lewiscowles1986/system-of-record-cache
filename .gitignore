@@ -1,0 +1,14 @@
+.terraform
+.terraform.lock.hcl
+
+.venv/
+.pytest_cache/
+__pycache__/
+*.egg-info/
+
+coverage/
+
+_build/
+deps/
+
+node_modules/

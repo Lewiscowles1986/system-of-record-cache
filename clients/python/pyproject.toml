@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shared-store-client"
+version = "0.1.0"
+description = "Shared key-value store client for Redis"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "redis>=5.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "testcontainers>=3.7.1"
+]
+
+[tool.setuptools]
+py-modules = ["store_client"]
