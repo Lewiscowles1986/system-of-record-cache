@@ -110,3 +110,19 @@ variable "bridge_image" {
   default     = "redis-rabbitmq-bridge:latest"
   description = "The Docker image for the bridge consumer (used when bridge_runtime = 'ecs')."
 }
+
+variable "storage_backend" {
+  type        = string
+  default     = "elasticache"
+  description = "The storage backend to provision. Valid values: 'elasticache' (Redis Serverless) or 'dynamodb' (DynamoDB Pay-Per-Request)."
+  validation {
+    condition     = contains(["elasticache", "dynamodb"], var.storage_backend)
+    error_message = "storage_backend must be either 'elasticache' or 'dynamodb'."
+  }
+}
+
+variable "dynamodb_table_name" {
+  type        = string
+  default     = null
+  description = "Optional custom name for the DynamoDB table. If null, defaults to Name-Environment."
+}

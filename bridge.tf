@@ -62,8 +62,8 @@ resource "aws_iam_role_policy" "lambda_cache_connect" {
         Effect   = "Allow"
         Action   = "elasticache:Connect"
         Resource = [
-          aws_elasticache_user.read_write.arn,
-          aws_elasticache_serverless_cache.this.arn
+          aws_elasticache_user.read_write["read-write"].arn,
+          aws_elasticache_serverless_cache.this[var.name].arn
         ]
       }
     ]
@@ -186,9 +186,9 @@ resource "aws_lambda_function" "bridge" {
 
   environment {
     variables = {
-      REDIS_HOST           = aws_elasticache_serverless_cache.this.endpoint[0].address
-      REDIS_PORT           = tostring(aws_elasticache_serverless_cache.this.endpoint[0].port)
-      REDIS_USER           = aws_elasticache_user.read_write.user_name
+      REDIS_HOST           = aws_elasticache_serverless_cache.this[var.name].endpoint[0].address
+      REDIS_PORT           = tostring(aws_elasticache_serverless_cache.this[var.name].endpoint[0].port)
+      REDIS_USER           = aws_elasticache_user.read_write["read-write"].user_name
       REDIS_STREAM_NAME    = "changelog"
       RABBITMQ_HOST        = var.rabbitmq_host
       RABBITMQ_PORT        = tostring(var.rabbitmq_port)
@@ -272,8 +272,8 @@ resource "aws_iam_role_policy" "ecs_task_cache_connect" {
         Effect   = "Allow"
         Action   = "elasticache:Connect"
         Resource = [
-          aws_elasticache_user.read_write.arn,
-          aws_elasticache_serverless_cache.this.arn
+          aws_elasticache_user.read_write["read-write"].arn,
+          aws_elasticache_serverless_cache.this[var.name].arn
         ]
       }
     ]
@@ -313,9 +313,9 @@ resource "aws_ecs_task_definition" "bridge" {
     image     = var.bridge_image
     essential = true
     environment = [
-      { name = "REDIS_HOST", value = aws_elasticache_serverless_cache.this.endpoint[0].address },
-      { name = "REDIS_PORT", value = tostring(aws_elasticache_serverless_cache.this.endpoint[0].port) },
-      { name = "REDIS_USER", value = aws_elasticache_user.read_write.user_name },
+      { name = "REDIS_HOST", value = aws_elasticache_serverless_cache.this[var.name].endpoint[0].address },
+      { name = "REDIS_PORT", value = tostring(aws_elasticache_serverless_cache.this[var.name].endpoint[0].port) },
+      { name = "REDIS_USER", value = aws_elasticache_user.read_write["read-write"].user_name },
       { name = "REDIS_STREAM_NAME", value = "changelog" },
       { name = "RABBITMQ_HOST", value = var.rabbitmq_host },
       { name = "RABBITMQ_PORT", value = tostring(var.rabbitmq_port) },
