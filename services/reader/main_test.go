@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,6 +73,11 @@ func TestReaderHandlers_Redis(t *testing.T) {
 	// Set globals
 	vendor = "testvnd"
 
+	// Init test schemas & OTel tracer
+	os.Setenv("SCHEMAS_DIR", "../../schemas")
+	loadSchemas()
+	initTracer()
+
 	// 4. Seed test data for 'companies' resource
 	compBytes, _ := json.Marshal(compPayload)
 	compHashKey := fmt.Sprintf("companies:%s", companyID)
@@ -82,6 +89,13 @@ func TestReaderHandlers_Redis(t *testing.T) {
 
 	compIndexKey := fmt.Sprintf("companies:index:account_id:%s", accountID)
 	rdb.Set(ctx, compIndexKey, companyID, 10*time.Second)
+
+	// Seed invalid data to test schema validation error (RFC 9457)
+	badCompHashKey := "companies:bad-company-123"
+	rdb.HSet(ctx, badCompHashKey, map[string]interface{}{
+		"payload": `{"name": 12345, "active": "not-bool"}`,
+	})
+	rdb.Expire(ctx, badCompHashKey, 10*time.Second)
 
 	// 5. Seed test data for 'users' resource
 	userBytes, _ := json.Marshal(userPayload)
@@ -165,6 +179,11 @@ func TestReaderHandlers_DynamoDB(t *testing.T) {
 	// Set globals
 	vendor = "testvnd"
 
+	// Init test schemas & OTel tracer
+	os.Setenv("SCHEMAS_DIR", "../../schemas")
+	loadSchemas()
+	initTracer()
+
 	// 4. Seed test data for 'companies' resource
 	compBytes, _ := json.Marshal(compPayload)
 	_, err = dbClient.PutItem(ctx, &dynamodb.PutItemInput{
@@ -177,6 +196,18 @@ func TestReaderHandlers_DynamoDB(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Failed to seed company in DynamoDB: %v", err)
+	}
+
+	// Seed invalid data to test schema validation error (RFC 9457)
+	_, err = dbClient.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(tableName),
+		Item: map[string]types.AttributeValue{
+			"PK":      &types.AttributeValueMemberS{Value: "companies:bad-company-123"},
+			"payload": &types.AttributeValueMemberS{Value: `{"name": 12345, "active": "not-bool"}`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to seed invalid company in DynamoDB: %v", err)
 	}
 
 	// 5. Seed test data for 'users' resource
@@ -322,6 +353,130 @@ func runTestSuite(t *testing.T) {
 
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("Expected status 400, got %d", rec.Code)
+		}
+	})
+
+	t.Run("Get Company with Accept format 1", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/companies/"+companyID, nil)
+		req.SetPathValue("resource", "companies")
+		req.SetPathValue("id", companyID)
+		req.Header.Set("Accept", "application/json+vnd+testvnd/companiesv1")
+		rec := httptest.NewRecorder()
+
+		handleGetPrimary(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", rec.Code)
+		}
+		if rec.Header().Get("Content-Type") != "application/json+vnd+testvnd/companiesv1" {
+			t.Errorf("Expected Content-Type 'application/json+vnd+testvnd/companiesv1', got %q", rec.Header().Get("Content-Type"))
+		}
+	})
+
+	t.Run("Get Company with Accept format 2", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/companies/"+companyID, nil)
+		req.SetPathValue("resource", "companies")
+		req.SetPathValue("id", companyID)
+		req.Header.Set("Accept", "application/json+vnd.testvnd.companies.v1")
+		rec := httptest.NewRecorder()
+
+		handleGetPrimary(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", rec.Code)
+		}
+		if rec.Header().Get("Content-Type") != "application/json+vnd.testvnd.companies.v1" {
+			t.Errorf("Expected Content-Type 'application/json+vnd.testvnd.companies.v1', got %q", rec.Header().Get("Content-Type"))
+		}
+	})
+
+	t.Run("Get Company with Accept application/json", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/companies/"+companyID, nil)
+		req.SetPathValue("resource", "companies")
+		req.SetPathValue("id", companyID)
+		req.Header.Set("Accept", "application/json")
+		rec := httptest.NewRecorder()
+
+		handleGetPrimary(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", rec.Code)
+		}
+		if rec.Header().Get("Content-Type") != "application/json" {
+			t.Errorf("Expected Content-Type 'application/json', got %q", rec.Header().Get("Content-Type"))
+		}
+	})
+
+	t.Run("Get Corrupted Company fails schema validation (HTTP 500 RFC 9457)", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/companies/bad-company-123", nil)
+		req.SetPathValue("resource", "companies")
+		req.SetPathValue("id", "bad-company-123")
+		rec := httptest.NewRecorder()
+
+		handleGetPrimary(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("Expected status 500, got %d", rec.Code)
+		}
+		if rec.Header().Get("Content-Type") != "application/problem+json" {
+			t.Errorf("Expected Content-Type 'application/problem+json', got %q", rec.Header().Get("Content-Type"))
+		}
+
+		var pd ProblemDetails
+		if err := json.Unmarshal(rec.Body.Bytes(), &pd); err != nil {
+			t.Fatalf("Failed to parse ProblemDetails: %v", err)
+		}
+		if pd.Title != "Cache Data Corrupted" {
+			t.Errorf("Expected title 'Cache Data Corrupted', got %q", pd.Title)
+		}
+		if len(pd.Errors) == 0 {
+			t.Error("Expected error details in ProblemDetails, got empty list")
+		}
+	})
+
+	t.Run("Get OpenAPI Specification successfully", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/openapi.json", nil)
+		rec := httptest.NewRecorder()
+
+		handleOpenAPI(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", rec.Code)
+		}
+		
+		var spec map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &spec); err != nil {
+			t.Fatalf("Failed to parse OpenAPI JSON: %v", err)
+		}
+
+		if spec["openapi"] != "3.0.3" {
+			t.Errorf("Expected openapi version '3.0.3', got %v", spec["openapi"])
+		}
+
+		paths := spec["paths"].(map[string]interface{})
+		if paths["/{resource}/{id}"] == nil {
+			t.Error("Expected path '/{resource}/{id}' to be defined")
+		}
+	})
+
+	t.Run("Get OpenAPI Specification in Yolo Mode", func(t *testing.T) {
+		os.Setenv("YOLO_MODE", "true")
+		defer os.Unsetenv("YOLO_MODE")
+
+		req := httptest.NewRequest("GET", "/openapi.json", nil)
+		rec := httptest.NewRecorder()
+
+		handleOpenAPI(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", rec.Code)
+		}
+
+		var spec map[string]interface{}
+		json.Unmarshal(rec.Body.Bytes(), &spec)
+		info := spec["info"].(map[string]interface{})
+		if !strings.Contains(info["title"].(string), "YOLO Mode") {
+			t.Errorf("Expected YOLO Mode title, got %v", info["title"])
 		}
 	})
 
