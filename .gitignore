@@ -12,3 +12,5 @@ _build/
 deps/
 
 node_modules/
+
+reader

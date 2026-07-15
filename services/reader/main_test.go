@@ -6,15 +6,41 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/redis/go-redis/v9"
 	tc "github.com/testcontainers/testcontainers-go"
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-func TestReaderHandlers(t *testing.T) {
+// Shared seed values
+const (
+	companyID = "comp-test-123"
+	accountID = "acc-test-456"
+	userID    = "user-john-doe"
+	email     = "john@example.com"
+)
+
+var (
+	compPayload = map[string]interface{}{
+		"name":   "Go Test Corp",
+		"active": true,
+	}
+	userPayload = map[string]interface{}{
+		"username": "johndoe",
+		"email":    email,
+	}
+)
+
+func TestReaderHandlers_Redis(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Start ephemeral Redis container using Testcontainers
@@ -40,19 +66,13 @@ func TestReaderHandlers(t *testing.T) {
 		t.Fatalf("Failed to parse Redis connection string: %v", err)
 	}
 	rdb = redis.NewClient(opts)
+	store = &RedisReader{client: rdb}
 
 	// Set globals
 	vendor = "testvnd"
 
 	// 4. Seed test data for 'companies' resource
-	companyID := "comp-test-123"
-	accountID := "acc-test-456"
-	compPayload := map[string]interface{}{
-		"name":   "Go Test Corp",
-		"active": true,
-	}
 	compBytes, _ := json.Marshal(compPayload)
-
 	compHashKey := fmt.Sprintf("companies:%s", companyID)
 	rdb.HSet(ctx, compHashKey, map[string]interface{}{
 		"secondary_index": accountID,
@@ -63,15 +83,8 @@ func TestReaderHandlers(t *testing.T) {
 	compIndexKey := fmt.Sprintf("companies:index:account_id:%s", accountID)
 	rdb.Set(ctx, compIndexKey, companyID, 10*time.Second)
 
-	// 5. Seed test data for 'users' resource (proving dynamic schema capability)
-	userID := "user-john-doe"
-	email := "john@example.com"
-	userPayload := map[string]interface{}{
-		"username": "johndoe",
-		"email":    email,
-	}
+	// 5. Seed test data for 'users' resource
 	userBytes, _ := json.Marshal(userPayload)
-
 	userHashKey := fmt.Sprintf("users:%s", userID)
 	rdb.HSet(ctx, userHashKey, map[string]interface{}{
 		"secondary_index": email,
@@ -82,7 +95,121 @@ func TestReaderHandlers(t *testing.T) {
 	userIndexKey := fmt.Sprintf("users:index:email:%s", email)
 	rdb.Set(ctx, userIndexKey, userID, 10*time.Second)
 
-	// 6. Run tests for primary lookup
+	// 6. Run test suite
+	runTestSuite(t)
+}
+
+func TestReaderHandlers_DynamoDB(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Start generic container for DynamoDB Local
+	dbContainer, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{
+		ContainerRequest: tc.ContainerRequest{
+			Image:        "amazon/dynamodb-local:latest",
+			ExposedPorts: []string{"8000/tcp"},
+			WaitingFor:   wait.ForListeningPort("8000/tcp"),
+		},
+		Started: true,
+	})
+	if err != nil {
+		t.Fatalf("Failed to start DynamoDB container: %v", err)
+	}
+	defer func() {
+		if err := tc.TerminateContainer(dbContainer); err != nil {
+			t.Errorf("Failed to terminate container: %v", err)
+		}
+	}()
+
+	// 2. Retrieve connection address
+	mappedPort, err := dbContainer.MappedPort(ctx, "8000")
+	if err != nil {
+		t.Fatalf("Failed to get mapped port: %v", err)
+	}
+	host, err := dbContainer.Host(ctx)
+	if err != nil {
+		t.Fatalf("Failed to get host: %v", err)
+	}
+	endpoint := fmt.Sprintf("http://%s:%s", host, mappedPort.Port())
+
+	// 3. Initialize DynamoDB Client
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion("us-east-1"),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("dummy", "dummy", "")),
+		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
+			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+				return aws.Endpoint{
+					URL:           endpoint,
+					SigningRegion: region,
+				}, nil
+			},
+		)),
+	)
+	if err != nil {
+		t.Fatalf("Failed to load AWS configuration: %v", err)
+	}
+
+	dbClient := dynamodb.NewFromConfig(cfg)
+
+	// Create test table
+	tableName := "shared-store-test"
+	err = createTableIfNotExist(ctx, dbClient, tableName)
+	if err != nil {
+		t.Fatalf("Failed to create test table: %v", err)
+	}
+
+	store = &DynamoDBReader{
+		client:    dbClient,
+		tableName: tableName,
+	}
+
+	// Set globals
+	vendor = "testvnd"
+
+	// 4. Seed test data for 'companies' resource
+	compBytes, _ := json.Marshal(compPayload)
+	_, err = dbClient.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(tableName),
+		Item: map[string]types.AttributeValue{
+			"PK":      &types.AttributeValueMemberS{Value: "companies:" + companyID},
+			"payload": &types.AttributeValueMemberS{Value: string(compBytes)},
+			"GSI1PK":  &types.AttributeValueMemberS{Value: "companies:index:account_id:" + accountID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to seed company in DynamoDB: %v", err)
+	}
+
+	// 5. Seed test data for 'users' resource
+	userBytes, _ := json.Marshal(userPayload)
+	_, err = dbClient.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(tableName),
+		Item: map[string]types.AttributeValue{
+			"PK":      &types.AttributeValueMemberS{Value: "users:" + userID},
+			"payload": &types.AttributeValueMemberS{Value: string(userBytes)},
+			"GSI1PK":  &types.AttributeValueMemberS{Value: "users:index:email:" + email},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to seed user in DynamoDB: %v", err)
+	}
+
+	// 6. Run test suite
+	runTestSuite(t)
+}
+
+func runTestSuite(t *testing.T) {
+	// health check test
+	t.Run("Get Health successfully", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/health", nil)
+		rec := httptest.NewRecorder()
+		handleHealth(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", rec.Code)
+		}
+	})
+
+	// tests for primary lookup
 	t.Run("Get Company successfully (primary)", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/companies/"+companyID, nil)
 		req.SetPathValue("resource", "companies")
@@ -131,7 +258,7 @@ func TestReaderHandlers(t *testing.T) {
 		}
 	})
 
-	// 7. Run tests for secondary index lookup
+	// tests for secondary index lookup
 	t.Run("Get Company successfully (secondary index)", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/companies/by-account_id/"+accountID, nil)
 		req.SetPathValue("resource", "companies")
@@ -195,6 +322,45 @@ func TestReaderHandlers(t *testing.T) {
 
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("Expected status 400, got %d", rec.Code)
+		}
+	})
+
+	t.Run("Memory Leak Test", func(t *testing.T) {
+		runReq := func() {
+			req := httptest.NewRequest("GET", "/companies/"+companyID, nil)
+			req.SetPathValue("resource", "companies")
+			req.SetPathValue("id", companyID)
+			rec := httptest.NewRecorder()
+			handleGetPrimary(rec, req)
+		}
+
+		// Warmup
+		for i := 0; i < 100; i++ {
+			runReq()
+		}
+
+		// Baseline memory after GC
+		runtime.GC()
+		var baseline runtime.MemStats
+		runtime.ReadMemStats(&baseline)
+
+		// Exercise the HTTP lookup path repeatedly
+		iterations := 1000
+		for i := 0; i < iterations; i++ {
+			runReq()
+		}
+
+		// Final memory after GC
+		runtime.GC()
+		var final runtime.MemStats
+		runtime.ReadMemStats(&final)
+
+		growth := int64(final.HeapAlloc) - int64(baseline.HeapAlloc)
+		limit := int64(512 * 1024) // 512 KB heap allocation growth limit
+
+		t.Logf("Memory Leak Test -> Baseline: %d KB, Final: %d KB, Growth: %d KB", baseline.HeapAlloc/1024, final.HeapAlloc/1024, growth/1024)
+		if growth > limit {
+			t.Errorf("Potential memory leak: Heap grew by %d KB over %d iterations (limit: %d KB)", growth/1024, iterations, limit/1024)
 		}
 	})
 }
