@@ -40,3 +40,15 @@ test-elixir:
 test-go:
 	@echo "Running Go Reader Service Integration Tests (via Testcontainers)..."
 	cd services/reader && go test -v ./...
+
+up-redis:
+	@echo "Starting local Redis emulator..."
+	docker compose --profile redis up -d
+
+up-dynamodb:
+	@echo "Starting local DynamoDB emulator..."
+	docker compose --profile dynamodb up -d
+
+down:
+	@echo "Stopping all emulators..."
+	docker compose --profile redis --profile dynamodb down

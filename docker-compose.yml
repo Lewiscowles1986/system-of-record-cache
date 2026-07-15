@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7.0-alpine
+    container_name: shared-store-redis-local
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    profiles:
+      - redis
+
+  dynamodb:
+    image: amazon/dynamodb-local:latest
+    container_name: shared-store-dynamodb-local
+    ports:
+      - "${DYNAMODB_PORT:-8000}:8000"
+    command: "-jar DynamoDBLocal.jar -sharedDb -inMemory"
+    profiles:
+      - dynamodb
