@@ -9,7 +9,7 @@ locals {
   vpc_id              = var.vpc_id != null ? var.vpc_id : data.aws_subnet.selected[0].vpc_id
   dynamodb_table_name = var.dynamodb_table_name != null ? var.dynamodb_table_name : "${var.name}-${var.environment}"
   security_group_ids  = local.use_elasticache ? (var.security_group_ids != null ? var.security_group_ids : [aws_security_group.cache[var.name].id]) : []
-  bridge_enabled      = var.rabbitmq_password_secret_arn != null && local.use_elasticache
+  bridge_enabled      = var.rabbitmq_password_secret_arn != null
 }
 
 # Create security group if not provided
@@ -101,6 +101,9 @@ resource "aws_dynamodb_table" "this" {
     attribute_name = "ttl"
     enabled        = true
   }
+
+  stream_enabled   = local.bridge_enabled
+  stream_view_type = local.bridge_enabled ? "NEW_IMAGE" : null
 
   tags = {
     Name        = each.key
