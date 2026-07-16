@@ -76,7 +76,7 @@ func TestReaderHandlers_Redis(t *testing.T) {
 	// Init test schemas & OTel tracer
 	os.Setenv("SCHEMAS_DIR", "../../schemas")
 	loadSchemas()
-	initTracer()
+	initTracer(ctx)
 
 	// 4. Seed test data for 'companies' resource
 	compBytes, _ := json.Marshal(compPayload)
@@ -182,7 +182,7 @@ func TestReaderHandlers_DynamoDB(t *testing.T) {
 	// Init test schemas & OTel tracer
 	os.Setenv("SCHEMAS_DIR", "../../schemas")
 	loadSchemas()
-	initTracer()
+	initTracer(ctx)
 
 	// 4. Seed test data for 'companies' resource
 	compBytes, _ := json.Marshal(compPayload)

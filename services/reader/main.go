@@ -225,10 +225,33 @@ func writeProblemDetails(w http.ResponseWriter, r *http.Request, title string, s
 	_ = json.NewEncoder(w).Encode(pd)
 }
 
-func initTracer() *sdktrace.TracerProvider {
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
+func initTracer(ctx context.Context) *sdktrace.TracerProvider {
+	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	var tp *sdktrace.TracerProvider
+
+	if endpoint != "" {
+		slog.Info("OpenTelemetry OTLP endpoint configured, initializing exporter", slog.String("endpoint", endpoint))
+		exporter, err := otlptracegrpc.New(ctx)
+		if err != nil {
+			slog.Error("Failed to create OTLP trace exporter, falling back to no-op provider", slog.Any("error", err))
+			tp = sdktrace.NewTracerProvider(
+				sdktrace.WithSampler(sdktrace.AlwaysSample()),
+			)
+		} else {
+			tp = sdktrace.NewTracerProvider(
+				sdktrace.WithBatcher(exporter),
+				sdktrace.WithSampler(sdktrace.AlwaysSample()),
+			)
+			slog.Info("OpenTelemetry OTLP batch tracing pipeline initialized successfully")
+		}
+	} else {
+		// Fallback / No-Op mode for local runs/tests
+		tp = sdktrace.NewTracerProvider(
+			sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		)
+		slog.Debug("OpenTelemetry tracing loaded in no-op fallback mode")
+	}
+
 	otel.SetTracerProvider(tp)
 	tracer = otel.Tracer("shared-store-reader")
 	return tp
@@ -372,7 +395,7 @@ func main() {
 	ctx := context.Background()
 
 	// 2. Initialize OpenTelemetry tracing
-	tp := initTracer()
+	tp := initTracer(ctx)
 	defer func() {
 		_ = tp.Shutdown(ctx)
 	}()
